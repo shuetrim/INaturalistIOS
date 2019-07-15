@@ -19,6 +19,7 @@
 #import <Realm/Realm.h>
 #import <RestKit/RestKit.h>
 #import <FBSDKLoginKit/FBSDKLoginKit.h>
+#import <SafariServices/SafariServices.h>
 
 #import "SettingsViewController.h"
 #import "Observation.h"
@@ -81,9 +82,10 @@ typedef NS_ENUM(NSInteger, SettingsAccountCell) {
 };
 static const int SettingsAccountRowCountLoggedIn = 3;
 static const int SettingsAccountRowCountLoggedOut = 1;
-
 static const int SettingsVersionRowCount = 1;
 
+static const NSString *LastChangedPartnerDateKey = @"org.inaturalist.lastChangedPartnerDateKey";
+static const int ChangePartnerMinimumInterval = 86400;
 
 @interface SettingsViewController () {
     UITapGestureRecognizer *tapAway;
@@ -367,11 +369,24 @@ static const int SettingsVersionRowCount = 1;
         [appDelegate rebuildCoreData];
         
         [hud hide:YES afterDelay:2.0f];
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0f * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self.navigationController popToRootViewControllerAnimated:YES];
+        });
     });
 }
 
 - (void)localSignOut
 {
+    // clear preference cached signin info & preferences
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:INatUsernamePrefKey];
+    [defaults removeObjectForKey:kINatUserIdPrefKey];
+    [defaults removeObjectForKey:INatPasswordPrefKey];
+    [defaults removeObjectForKey:INatTokenPrefKey];
+    [defaults removeObjectForKey:kInatCustomBaseURLStringKey];
+    [defaults synchronize];
+    
     // clear google signin
     if ([[GIDSignIn sharedInstance] hasAuthInKeychain]) {
         [[GIDSignIn sharedInstance] signOut];
@@ -388,15 +403,6 @@ static const int SettingsVersionRowCount = 1;
         [[NXOAuth2AccountStore sharedStore] removeAccount:account];
     }
     
-    // clear preference cached signin info & preferences
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults removeObjectForKey:INatUsernamePrefKey];
-    [defaults removeObjectForKey:kINatUserIdPrefKey];
-    [defaults removeObjectForKey:INatPasswordPrefKey];
-    [defaults removeObjectForKey:INatTokenPrefKey];
-    [defaults removeObjectForKey:kInatCustomBaseURLStringKey];
-    [defaults synchronize];
-    
     // clear cached RKClient authentication details
     [RKClient.sharedClient setUsername:nil];
     [RKClient.sharedClient setPassword:nil];
@@ -405,12 +411,6 @@ static const int SettingsVersionRowCount = 1;
     // since we've removed any custom base URL, reconfigure RestKit again
     INaturalistAppDelegate *appDelegate = (INaturalistAppDelegate *)[UIApplication sharedApplication].delegate;
     [appDelegate reconfigureForNewBaseUrl];
-    
-    // remove OAuth account stuff
-    NXOAuth2AccountStore *sharedStore = [NXOAuth2AccountStore sharedStore];
-    for (NXOAuth2Account *account in sharedStore.accounts) {
-        [sharedStore removeAccount:account];
-    }
     
     // clear realm
     RLMRealm *realm = [RLMRealm defaultRealm];
@@ -428,41 +428,26 @@ static const int SettingsVersionRowCount = 1;
     [self.tableView reloadData];
 }
 
-- (void)launchTutorial
-{
-    NSArray *tutorialImages = @[
-                                [UIImage imageNamed:@"tutorial1"],
-                                [UIImage imageNamed:@"tutorial2"],
-                                [UIImage imageNamed:@"tutorial3"],
-                                [UIImage imageNamed:@"tutorial4"],
-                                [UIImage imageNamed:@"tutorial5"],
-                                [UIImage imageNamed:@"tutorial6"],
-                                [UIImage imageNamed:@"tutorial7"],
-                                ];
-    
-    NSArray *galleryData = [tutorialImages bk_map:^id(UIImage *image) {
-        return [MHGalleryItem itemWithImage:image];
-    }];
-    
-    MHUICustomization *customization = [[MHUICustomization alloc] init];
-    customization.showOverView = NO;
-    customization.showMHShareViewInsteadOfActivityViewController = NO;
-    customization.hideShare = YES;
-    customization.useCustomBackButtonImageOnImageViewer = NO;
-    
-    MHGalleryController *gallery = [MHGalleryController galleryWithPresentationStyle:MHGalleryViewModeImageViewerNavigationBarShown];
-    gallery.galleryItems = galleryData;
-    gallery.presentationIndex = 0;
-    gallery.UICustomization = customization;
-    
-    __weak MHGalleryController *blockGallery = gallery;
-    
-    gallery.finishedCallback = ^(NSInteger currentIndex, UIImage *image, MHTransitionDismissMHGallery *interactiveTransition, MHGalleryViewMode viewMode) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [blockGallery dismissViewControllerAnimated:YES completion:nil];
-        });
-    };
-    [self presentMHGalleryController:gallery animated:YES completion:nil];
+- (void)launchTutorial {
+#ifdef INatTutorialURL
+    if ([[INatReachability sharedClient] isNetworkReachable]) {
+        [[Analytics sharedClient] event:kAnalyticsEventTutorial];
+        NSURL *tutorialUrl = [NSURL URLWithString:INatTutorialURL];
+        
+        SFSafariViewController *safari = [[SFSafariViewController alloc] initWithURL:tutorialUrl];
+        [self.navigationController presentViewController:safari animated:YES completion:nil];
+    } else {
+        [self networkUnreachableAlert];
+    }
+#else
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:NSLocalizedString(@"Cannot rate", @"Failure message")
+                                                                   message:NSLocalizedString(@"No URL configured", nil)
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"OK", nil)
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+#endif
 }
 
 - (void)sendSupportEmail
@@ -527,43 +512,6 @@ static const int SettingsVersionRowCount = 1;
     return;
 }
 
-- (void)selectedPartner:(Partner *)partner {
-    __weak typeof(self)weakSelf = self;
-    INaturalistAppDelegate *appDelegate = (INaturalistAppDelegate *)[UIApplication sharedApplication].delegate;
-    [appDelegate.loginController loggedInUserSelectedPartner:partner
-                                                  completion:^{
-                                                      [[Analytics sharedClient] event:kAnalyticsEventSettingsNetworkChangeCompleted];
-                                                      [weakSelf.tableView reloadData];
-                                                  }];
-}
-
-- (void)choseToChangeNetworkPartner {
-    INaturalistAppDelegate *appDelegate = (INaturalistAppDelegate *)[UIApplication sharedApplication].delegate;
-    ExploreUserRealm *me = [appDelegate.loginController meUserLocal];
-    if (!me) { return; }
-    
-    NSArray *partnerNames = [self.partnerController.partners bk_map:^id(Partner *p) {
-        return p.name;
-    }];
-    
-    Partner *currentPartner = [self.partnerController partnerForSiteId:me.siteId];
-    
-    __weak typeof(self) weakSelf = self;
-    [[[ActionSheetStringPicker alloc] initWithTitle:NSLocalizedString(@"Choose iNat Network", "title of inat network picker")
-                                               rows:partnerNames
-                                   initialSelection:[partnerNames indexOfObject:currentPartner.name]
-                                          doneBlock:^(ActionSheetStringPicker *picker, NSInteger selectedIndex, id selectedValue) {
-                                              __strong typeof(weakSelf) strongSelf = weakSelf;
-                                              // update base url
-                                              Partner *p = strongSelf.partnerController.partners[selectedIndex];
-                                              if (![p isEqual:currentPartner]) {
-                                                  [weakSelf selectedPartner:p];
-                                              }
-                                          }
-                                        cancelBlock:nil
-                                             origin:self.view] showActionSheetPicker];
-}
-
 - (void)settingChanged:(NSString *)key newValue:(BOOL)newValue {
     NSString *analyticsEvent = newValue ? kAnalyticsEventSettingEnabled : kAnalyticsEventSettingDisabled;
     [[Analytics sharedClient] event:analyticsEvent
@@ -595,6 +543,130 @@ static const int SettingsVersionRowCount = 1;
             }
         }
     }
+}
+
+
+#pragma mark - partner change stuff
+
+- (NSDateFormatter *)networkPartnerChangeDateFormatter {
+    static NSDateFormatter *_df = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        _df = [[NSDateFormatter alloc] init];
+        [_df setDateFormat:@"yyyy-MM-dd hh:mm:ss Z"];
+    });
+    return _df;
+}
+
+- (BOOL)canChangeNetworkPartner {
+    NSString *lastChangeDateStr = [[NSUserDefaults standardUserDefaults] stringForKey:LastChangedPartnerDateKey];
+    if (!lastChangeDateStr) {
+        return YES;
+    } else {
+        NSDateFormatter *df = [self networkPartnerChangeDateFormatter];
+        NSDate *lastChange = [df dateFromString:lastChangeDateStr];
+        if (!lastChange) {
+            return YES;
+        } else {
+            NSTimeInterval timeSinceChange = [[NSDate date] timeIntervalSinceDate:lastChange];
+            if (timeSinceChange > ChangePartnerMinimumInterval) {
+                return YES;
+            } else {
+                return NO;
+            }
+        }
+    }
+}
+
+- (void)choseToChangeNetworkPartner {
+    if ([self canChangeNetworkPartner]) {
+        [[Analytics sharedClient] event:kAnalyticsEventSettingsNetworkChangeBegan];
+
+        INaturalistAppDelegate *appDelegate = (INaturalistAppDelegate *)[UIApplication sharedApplication].delegate;
+        ExploreUserRealm *me = [appDelegate.loginController meUserLocal];
+        if (!me) { return; }
+        
+        NSArray *partnerNames = [self.partnerController.partners bk_map:^id(Partner *p) {
+            return p.name;
+        }];
+        
+        Partner *currentPartner = [self.partnerController partnerForSiteId:me.siteId];
+        
+        __weak typeof(self) weakSelf = self;
+        [[[ActionSheetStringPicker alloc] initWithTitle:NSLocalizedString(@"Choose iNat Network", "title of inat network picker")
+                                                   rows:partnerNames
+                                       initialSelection:[partnerNames indexOfObject:currentPartner.name]
+                                              doneBlock:^(ActionSheetStringPicker *picker, NSInteger selectedIndex, id selectedValue) {
+                                                  __strong typeof(weakSelf) strongSelf = weakSelf;
+                                                  // update base url
+                                                  Partner *p = strongSelf.partnerController.partners[selectedIndex];
+                                                  if (![p isEqual:currentPartner]) {
+                                                      [weakSelf presentPartnerChangeAlertForPartner:p];
+                                                  }
+                                              }
+                                            cancelBlock:nil
+                                                 origin:self.view] showActionSheetPicker];
+    } else {
+        NSString *cantChangeMsg = NSLocalizedString(@"You can only change your network affiliation once per day.", @"failure message when the user tries to change their network affiliation too often");
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
+                                                                       message:cantChangeMsg
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"OK", nil)
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    }
+}
+
+
+- (void)presentPartnerChangeAlertForPartner:(Partner *)partner {
+    NSString *baseConfirmText = NSLocalizedString(@"%@ is a member of the iNaturalist Network in %@. Local institutions supporting %@ will have access to your email address and access to the true coordinates for observations that are publicly obscured or private. Would you like to change your affiliation?", @"confirmation alert text when changing a users network affiliation. %1%@ is network name, %2%@ is the country, %3%@ is the network name again");
+    NSString *confirmMsg = [NSString stringWithFormat:baseConfirmText,
+                            partner.name, partner.countryName, partner.name];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
+                                                                   message:confirmMsg
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    
+    NSString *confirmAgreeText = NSLocalizedString(@"Yes, change my affiliation", @"change network partner button");
+    NSString *confirmDisgreeText = NSLocalizedString(@"No, don’t change my affiliation", @"do not change network partner button");
+    NSString *learnMoreText = NSLocalizedString(@"Learn more", @"learn more (about network partner changes) button text");
+
+    
+    __weak typeof(self)weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:confirmAgreeText
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * _Nonnull action) {
+                                                [weakSelf changePartner:partner];
+                                            }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:confirmDisgreeText
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    
+     [alert addAction:[UIAlertAction actionWithTitle:learnMoreText
+                                       style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction * _Nonnull action) {
+                                                 UIApplication *app = [UIApplication sharedApplication];
+                                                 [app openURL:[NSURL URLWithString:INatPartnerLearnMoreURL]];
+                                             }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)changePartner:(Partner *)partner {
+    NSDate *now = [NSDate date];
+    NSString *nowString = [[self networkPartnerChangeDateFormatter] stringFromDate:now];
+    [[NSUserDefaults standardUserDefaults] setObject:nowString
+                                              forKey:LastChangedPartnerDateKey];
+
+    __weak typeof(self)weakSelf = self;
+    INaturalistAppDelegate *appDelegate = (INaturalistAppDelegate *)[UIApplication sharedApplication].delegate;
+    [appDelegate.loginController loggedInUserSelectedPartner:partner
+                                                  completion:^{
+                                                      [[Analytics sharedClient] event:kAnalyticsEventSettingsNetworkChangeCompleted];
+                                                      [weakSelf.tableView reloadData];
+                                                  }];
+
 }
 
 #pragma mark - UITableView
@@ -701,25 +773,7 @@ static const int SettingsVersionRowCount = 1;
 			if (![appDelegate.loginController isLoggedIn]) {
 				[self presentSignup];
             } else {
-                [[Analytics sharedClient] event:kAnalyticsEventSettingsNetworkChangeBegan];
-                // show SERIOUS alert
-                NSString *alertMsg = NSLocalizedString(@"Changing your iNaturalist Network affiliation will alter some parts of the app, like what taxa appear in searches, but it will also allow the new network partner to view and download all of your data. Are you sure you want to do this?",
-                                                       @"alert msg before changing the network affiliation.");
-                NSString *cancelBtnMsg = NSLocalizedString(@"No, don't change my affiliation", @"cancel button before changing network affiliation.");
-                NSString *continueBtnMsg = NSLocalizedString(@"Yes, change my affiliation", @"continue button before changing network affiliation.");
-                
-                UIAlertController *alert = [UIAlertController alertControllerWithTitle:NSLocalizedString(@"Warning", nil)
-                                                                               message:alertMsg
-                                                                        preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:cancelBtnMsg
-                                                          style:UIAlertActionStyleCancel
-                                                        handler:nil]];
-                [alert addAction:[UIAlertAction actionWithTitle:continueBtnMsg
-                                                          style:UIAlertActionStyleDefault
-                                                        handler:^(UIAlertAction * _Nonnull action) {
-                                                            [self choseToChangeNetworkPartner];
-                                                        }]];
-                [self.tabBarController presentViewController:alert animated:YES completion:nil];
+                [self choseToChangeNetworkPartner];
             }
             
             return;
@@ -909,7 +963,7 @@ static const int SettingsVersionRowCount = 1;
 - (UITableViewCell *)tableView:(UITableView *)tableView tutorialCellForIndexPath:(NSIndexPath *)indexPath {
     SettingsDetailTextCell *cell = [tableView dequeueReusableCellWithIdentifier:@"detailText"
                                                                    forIndexPath:indexPath];
-    cell.leadingTextLabel.text = NSLocalizedString(@"Tutorial", @"label for start tutorial action in settings.");
+    cell.leadingTextLabel.text = NSLocalizedString(@"Video Tutorial", @"label for start video tutorial action in settings.");
     return cell;
 }
 

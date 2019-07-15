@@ -241,7 +241,7 @@
 - (void)configureApplication {
     
 	RLMRealmConfiguration *config = [RLMRealmConfiguration defaultConfiguration];
-	config.schemaVersion = 11;
+	config.schemaVersion = 13;
     config.migrationBlock = ^(RLMMigration *migration, uint64_t oldSchemaVersion) {
         if (oldSchemaVersion < 1) {
             // add searchable (ie diacritic-less) taxon names
@@ -364,7 +364,6 @@
     [ProjectObservation deleteAll];
     [NewsItem deleteAll];
     [ObservationFieldValue deleteAll];
-    [User deleteAll];
     
     for (DeletedRecord *dr in [DeletedRecord allObjects]) {
         [dr deleteEntity];
